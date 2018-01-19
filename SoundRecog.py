@@ -1,99 +1,128 @@
+import pyaudio
+import wave
 from scipy import signal
+from sys import byteorder
+from array import array
+from struct import pack
+import time
 import numpy as np
+import collections
+import SpectrumBuffer as sb
+import RingBuffer as rb
+import scipy
+import whistleCNNTest
 import matplotlib.pyplot as plt
-from scipy.io import wavfile
-import tensorflow as tf
+import matplotlib
+import threading
+from pynput.keyboard import Key, Listener, KeyCode
+import pickle
 
-from tensorflow.contrib import learn
-from tensorflow.contrib.learn.python.learn.estimators import model_fn as model_fn_lib
+import gi  
+gi.require_version('Playerctl', '1.0')  
+from gi.repository import Playerctl  
+player = Playerctl.Player()
 
-tf.logging.set_verbosity(tf.logging.INFO)
-
-
-# Our application logic will be added here
-def cnn_model_fn(features, labels, mode):
-  """Model function for CNN."""
-  # Input Layer
-  input_layer = tf.reshape(features, [-1, 28, 28, 1])
-
-  # Convolutional Layer #1
-  conv1 = tf.layers.conv2d(
-      inputs=input_layer,
-      filters=32,
-      kernel_size=[5, 5],
-      padding="same",
-      activation=tf.nn.relu)
-
-  # Pooling Layer #1
-  pool1 = tf.layers.max_pooling2d(inputs=conv1, pool_size=[2, 2], strides=2)
-
-  # Convolutional Layer #2 and Pooling Layer #2
-  conv2 = tf.layers.conv2d(
-      inputs=pool1,
-      filters=64,
-      kernel_size=[5, 5],
-      padding="same",
-      activation=tf.nn.relu)
-  pool2 = tf.layers.max_pooling2d(inputs=conv2, pool_size=[2, 2], strides=2)
-
-  # Dense Layer
-  pool2_flat = tf.reshape(pool2, [-1, 7 * 7 * 64])
-  dense = tf.layers.dense(inputs=pool2_flat, units=1024, activation=tf.nn.relu)
-  dropout = tf.layers.dropout(
-      inputs=dense, rate=0.4, training=mode == learn.ModeKeys.TRAIN)
-
-  # Logits Layer
-  logits = tf.layers.dense(inputs=dropout, units=10)
-
-  loss = None
-  train_op = None
-
-  # Calculate Loss (for both TRAIN and EVAL modes)
-  if mode != learn.ModeKeys.INFER:
-    onehot_labels = tf.one_hot(indices=tf.cast(labels, tf.int32), depth=10)
-    loss = tf.losses.softmax_cross_entropy(
-        onehot_labels=onehot_labels, logits=logits)
-
-  # Configure the Training Op (for TRAIN mode)
-  if mode == learn.ModeKeys.TRAIN:
-    train_op = tf.contrib.layers.optimize_loss(
-        loss=loss,
-        global_step=tf.contrib.framework.get_global_step(),
-        learning_rate=0.001,
-        optimizer="SGD")
-
-  # Generate Predictions
-  predictions = {
-      "classes": tf.argmax(
-          input=logits, axis=1),
-      "probabilities": tf.nn.softmax(
-          logits, name="softmax_tensor")
-  }
-
-  # Return a ModelFnOps object
-  return model_fn_lib.ModelFnOps(
-      mode=mode, predictions=predictions, loss=loss, train_op=train_op)
+import pulsectl
+pulse =  pulsectl.Pulse('volume-increaser')
 
 
+Labels = ['DownWhistle',
+ 'ForwardCommand',
+ 'LeftCommand',
+ 'RightCommand',
+ 'UpWhistle',
+ 'background'];
+recordLabel = Labels[5]
 
-if __name__ == "__main__":
-    fs, data = wavfile.read("samples/Audio recording 2017-08-04 16-30-20.wav");
-    downSampleRatio = 7
-    audioSignal = data#.T[0];
-    audioSignal = signal.decimate(audioSignal,downSampleRatio);
-    f, t, Zxx = signal.stft(audioSignal, fs/downSampleRatio, nperseg=128,return_onesided=True,noverlap=0);
+def printLabels():
+    for i,label in enumerate(Labels):
+        print("{0}: {1}".format(i+1,label))
+printLabels()
+
+import SoundRecogConfig as sc
+matplotlib.use('GTKAgg')
+plt.axis([0, 50, 0, 50])
     
+
+#plt.ion()
+
+spectrum = sb.SpectrumBuffer(sc.nFrequencies, sc.nTimeSamples)
+soundBuffer = rb.RingBuffer(2*sc.dataRate)
+background = np.zeros(sc.nFrequencies, dtype='f')
+alpha = 0.99;
+run = True
+prevMean = 0;
+detectEnableTicks = 0;
+c=0
+start_time = time.time()
+data = []
+dataLabels = []
+
+def doAction(command):
+    global player
+    if(command == 'ForwardCommand'):
+        player.play_pause()
+    elif(command == 'RightCommand'):
+        player.next()
+    elif(command == 'LeftCommand'):
+        player.previous()
+    elif(command == 'DownWhistle'):
+        for sink in pulse.sink_list():
+            pulse.volume_change_all_chans(sink, -0.1)
+    elif(command == 'UpWhistle'):
+        for sink in pulse.sink_list():
+            pulse.volume_change_all_chans(sink, 0.1)    
+
+            
+
+def callback(in_data, frame_count, time_info, status):
+    global spectrum, soundBuffer, recordLabel, data, dataLabels
+    snd_data = np.fromstring(in_data, dtype='int16')
+    snd_data = signal.decimate(snd_data, sc.downSampleRatio,zero_phase=True);
+    soundBuffer.extend(snd_data)
+    Y = np.abs(np.fft.rfft(snd_data))[sc.nFrequencyOffsetLow:sc.nFrequencyHighIndex] #Skip lower frequencies
+    spectrum.extend(Y)
+    return None, pyaudio.paContinue
     
-   
-    plt.pcolormesh(t, f, np.abs(Zxx), vmin=0,cmap='gray');
-    plt.title('STFT Magnitude')
-    plt.ylabel('Frequency [Hz]')
-    plt.xlabel('Time [sec]')
-    plt.show()
+
+p = pyaudio.PyAudio()
+stream = p.open(format=pyaudio.paInt16,
+               channels=1,
+               rate=sc.recordRate,
+               input=True,
+               frames_per_buffer=sc.chunkSize,
+               stream_callback=callback)
+
+
+
+stream.start_stream()
+predictions = [-1]*2
+timer = 0
+while stream.is_active():
+    curr_spectrum = spectrum.get().T
+    #plt.cla()
+    #plt.pcolormesh(curr_spectrum, vmin=0,cmap='gray');
+    #plt.pause(0.1)
+    #print(whistleCNNTest.estimate(curr_spectrum))
+    #print(time.time()-start_time)
+    predictions[1:] = predictions[0:-1]
+    prediction, certainty = whistleCNNTest.estimate(curr_spectrum)
+    if(certainty > 0.7):
+                   #(len(set(predictions)) == 1) and
+        predictions[0] = prediction
+        if((prediction != -1) and
+           (prediction != 'background') and
+           (timer > 1)):
+            print(certainty)
+            print(prediction)
+            doAction(prediction)
+            timer = 0
+    else:
+        predictions[0] = -1
+    timer+=time.time()-start_time
+    start_time = time.time()
     
-    #plt.plot(audioSignal)
-    #plt.show()
-    
-    
-    #tf.get_variable('spectro', initializer=Zxx)
-    #tf.app.run()
+
+stream.stop_stream()
+stream.close()
+p.terminate()

@@ -1,0 +1,7 @@
+whistle_convnet_model_normalized: {'accuracy': 0.87052119, 'loss': 0.46520728, 'global_step': 20001}
+whistle_convnet_more_data_0.2_background: {'accuracy': 0.24918567, 'loss': 1.7268798, 'global_step': 20000}
+whistle_convnet_model_normalized2 :{'accuracy': 0.8703236, 'loss': 0.47582647, 'global_step': 20000}
+whistle_convnet_model_normalized4 :{'accuracy': 0.90704274, 'loss': 0.35781255, 'global_step': 20000}
+whistle_convnet_model_normalized5  {'accuracy': 0.9659546, 'loss': 0.11887788, 'global_step': 100000}
+Right command is predicted instead of upwhistle sometimes.
+Right whistle and ForwardCommand is triggered by music
